@@ -1,4 +1,5 @@
-# Cryptera Python wrapper for using in our password manager.
+# Cryptera
+Python wrapper to be used in our password manmager
 ## Build from source code
 ### Dependencies:
 * libgcrypt
