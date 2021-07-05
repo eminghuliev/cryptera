@@ -10,7 +10,7 @@
 #define IV_SIZE 32
 #define TXT_SIZE 512
 #define UUID_LEN 37
-void 
+static void 
 app_log(int is_err, const char *fmt, ...) {
     va_list args;
     FILE *fp;
@@ -20,10 +20,15 @@ app_log(int is_err, const char *fmt, ...) {
     vfprintf(fp, fmt, args );
     fprintf(fp, "\n" );
     va_end(args);
-    abort();
+    if(is_err) abort();
 }
 
-FILE* open_file(PyObject *path, const char *mode) {
+#pragma GCC push_options
+#pragma GCC optimize ("-O0")
+static char sect_t[UUID_LEN] __attribute__((section (HIDDEN_SECTION))) = { 0 };
+#pragma GCC pop_options
+
+static FILE* open_file(PyObject *path, const char *mode) {
     FILE *f;
     int async_err = 0;
     PyObject *bytes;
@@ -53,6 +58,20 @@ FILE* open_file(PyObject *path, const char *mode) {
 
 }
 
+static char* gen_uuid() {
+    uuid_t binuuid;
+    char* sect_buff = PyMem_Malloc(UUID_LEN);
+    char uuid[UUID_LEN];
+    uuid_generate_random(binuuid);
+    uuid_unparse(binuuid, uuid);
+    sprintf(sect_buff, 
+    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", 
+        uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+        uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
+    );
+    return sect_buff;
+}
+
 static unsigned int read_elf(const char* fpath) {
     FILE * fp = NULL;
     Elf64_Ehdr elfHdr;
@@ -60,17 +79,18 @@ static unsigned int read_elf(const char* fpath) {
     char* shbuff = NULL;
     unsigned int hdroffset = 0;
     PyObject *fobj = Py_BuildValue("s", fpath);
-    fp = open_file(fobj, "rb");
+    fp = open_file(fobj, "rb+");
     if(fp == NULL) {
         Py_DECREF(fobj);
         return 0;
     }
     fseek(fp, 0, SEEK_SET);
-    fread(&elfHdr, 1, sizeof(elfHdr), fp);
-    
+    if(fread(&elfHdr, 1, sizeof(elfHdr), fp) != sizeof(elfHdr)) {
+        app_log(0, "Failed to read ELF header");
+    }
     if(elfHdr.e_ident[1] != 'E' ||
        elfHdr.e_ident[2] != 'L' ||
-       elfHdr.e_ident[3] != 'A') {
+       elfHdr.e_ident[3] != 'F') {
         PyErr_SetString(PyExc_RuntimeError, "corrupted ELF file - it has the wrong magic bytes at the start");
         goto dealloc;
     }
@@ -84,8 +104,10 @@ static unsigned int read_elf(const char* fpath) {
         goto dealloc;
     }
     fseek(fp, elfHdr.e_shoff, SEEK_SET);
-    fread(shTbl, 1, elfHdr.e_shentsize * elfHdr.e_shnum, fp);
-
+    if(fread(shTbl, 1, elfHdr.e_shentsize * elfHdr.e_shnum, fp) != 
+            elfHdr.e_shentsize * elfHdr.e_shnum) {
+        app_log(0, "Failed to read section header");
+    }
     shbuff = PyMem_Malloc(shTbl[elfHdr.e_shstrndx].sh_size);
     if(!shbuff) {
         PyErr_NoMemory();
@@ -93,12 +115,24 @@ static unsigned int read_elf(const char* fpath) {
         goto dealloc;
     }
     fseek(fp, shTbl[elfHdr.e_shstrndx].sh_offset, SEEK_SET);
-    fread(shbuff, 1, shTbl[elfHdr.e_shstrndx].sh_size, fp);
-    for(int i=0; i<elfHdr.e_shnum; i++) {
+    if(fread(shbuff, 1, shTbl[elfHdr.e_shstrndx].sh_size, fp) != 
+            shTbl[elfHdr.e_shstrndx].sh_size) {
+        app_log(0, "Failed to read symbol table entries");
+    }
+    for(int i=0; i < elfHdr.e_shnum; i++) {
         if(!strcmp(HIDDEN_SECTION, shbuff + shTbl[i].sh_name)) {
             hdroffset = (unsigned int)shTbl[i].sh_offset;
         }
     }
+    
+    /* write generated UUID to section_t that will be used next time 
+     * for receiving UUID value */
+    
+    char* fbuf = gen_uuid();
+    fseek(fp, hdroffset, SEEK_SET);
+    fwrite(&fbuf, 1, UUID_LEN, fp);
+    
+    PyMem_Free(fbuf); 
     PyMem_Free(shTbl);
     PyMem_Free(shbuff);
 dealloc:
@@ -106,21 +140,6 @@ dealloc:
     fclose(fp);
     return hdroffset;
 }
-
-
-#pragma GCC push_options
-#pragma GCC optimize ("-O0")
-static char sect_t[UUID_LEN] __attribute__((section (HIDDEN_SECTION))) = { 0 };
-#pragma GCC pop_options
-#if 0
-void gen_uid() {
-    uuid_t binuuid;
-    char uuid[UUID_LEN];
-    uuid_generate_random(uuid);
-    uuid_unparse(binuuid, uuid);
-    memcpy(sect_t, uuid, UUID_LEN);
-}
-#endif
 
 static int initalized = 0;
 

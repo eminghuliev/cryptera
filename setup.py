@@ -5,7 +5,7 @@ import subprocess
 cryptera_module = Extension(
     'cryptera',
     sources=["libdec.c"],
-    libraries     = ['gcrypt'],
+    libraries     = ['gcrypt', 'uuid'],
 )
 setup(
     version="1.0",
