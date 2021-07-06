@@ -58,24 +58,13 @@ static FILE* open_file(PyObject *path, const char *mode) {
 
 }
 
-static char* gen_uuid() {
-    uuid_t binuuid;
-    char* sect_buff = PyMem_Malloc(UUID_LEN);
-    char uuid[UUID_LEN];
-    uuid_generate_random(binuuid);
-    uuid_unparse(binuuid, uuid);
-    sprintf(sect_buff, 
-    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", 
-        uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
-        uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
-    );
-    return sect_buff;
-}
-
-static unsigned int read_elf(const char* fpath) {
+static unsigned int prep_elf(const char* fpath) {
     FILE * fp = NULL;
     Elf64_Ehdr elfHdr;
     Elf64_Shdr* shTbl;
+    uuid_t binuuid;
+    char uuid[UUID_LEN];
+    char uuid_bytes[UUID_LEN];
     char* shbuff = NULL;
     unsigned int hdroffset = 0;
     PyObject *fobj = Py_BuildValue("s", fpath);
@@ -127,12 +116,16 @@ static unsigned int read_elf(const char* fpath) {
     
     /* write generated UUID to section_t that will be used next time 
      * for receiving UUID value */
-    
-    char* fbuf = gen_uuid();
+    uuid_generate_random(binuuid);
+    uuid_unparse(binuuid, uuid);
+    sprintf(uuid_bytes, 
+    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", 
+        uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
+        uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]
+    );
     fseek(fp, hdroffset, SEEK_SET);
-    fwrite(&fbuf, 1, UUID_LEN, fp);
-    
-    PyMem_Free(fbuf); 
+    fwrite(&uuid_bytes, 1, sizeof(uuid_bytes), fp);
+
     PyMem_Free(shTbl);
     PyMem_Free(shbuff);
 dealloc:
@@ -145,9 +138,11 @@ static int initalized = 0;
 
 static PyObject * crypt_init(PyObject *self, PyObject *args) {
     Dl_info info;
-    if (dladdr(crypt_init, &info)) {
-        const char *dli_fname = info.dli_fname;
-        read_elf(dli_fname);
+    if(!(*sect_t)) {
+        if (dladdr(crypt_init, &info)) {
+            const char *dli_fname = info.dli_fname;
+            prep_elf(dli_fname);
+        }
     }
     if(initalized) { 
         PyErr_SetString(PyExc_RuntimeError, "Cryptera has been initialized already"); 
@@ -183,11 +178,61 @@ static PyObject * decode_fn(PyObject *self, PyObject *args) {
     return NULL;
 }
 
+unsigned char* decOrenc(const char * payload, const char *mpwd_str, _Bool enc) {
+    const char *master_pwd = mpwd_str;
+    char iv[IV_SIZE] = { 0 };
+    char keyBuffer[BUFF_SIZE];
+    /* unsigned char ptext[TXT_SIZE] = { 0 };
+    unsigned char ctext[TXT_SIZE] = { 0 }; */
+    unsigned char* ptext = PyMem_Malloc(TXT_SIZE);
+    unsigned char* ctext = PyMem_Malloc(TXT_SIZE);
+    unsigned char* out = NULL;
+    if(enc) memcpy(ptext, payload, TXT_SIZE);
+    char *salt = sect_t;
+    size_t saltLen = strlen(salt);
+    gcry_cipher_hd_t cipherHd;
+    gcry_error_t err;
+    err = gcry_cipher_open(&cipherHd, GCRY_CIPHER_AES256, GCRY_CIPHER_MODE_CBC, GCRY_CIPHER_SECURE);
+    if(err) app_log(1, "Failed in grcy_cipher_open %s -> %s",
+            gcry_strsource(err),
+            gcry_strerror(err));
+    gcry_kdf_derive(master_pwd, strlen(master_pwd), GCRY_KDF_PBKDF2, GCRY_MD_SHA256, salt, saltLen, 10000, BUFF_SIZE, keyBuffer);
+    err = gcry_cipher_setkey(cipherHd, keyBuffer, BUFF_SIZE);
+    if(err) app_log(1, "Failed in grcy_cipher_setkey %s -> %s",
+            gcry_strsource(err),
+            gcry_strerror(err));
+    err = gcry_cipher_setiv(cipherHd, iv, 16);
+    if(err) app_log(1, "Failed in grcy_cipher_setiv %s -> %s",
+            gcry_strsource(err),
+            gcry_strerror(err));
+    if(enc) {
+        err = gcry_cipher_encrypt(cipherHd, ctext, TXT_SIZE, ptext, TXT_SIZE);
+        if(err) app_log(1, "Failed in grcy_cipher_encrypt %s -> %s",
+                gcry_strsource(err),
+                gcry_strerror(err));
+    } else {
+        err = gcry_cipher_decrypt(cipherHd, ptext, TXT_SIZE, ctext, TXT_SIZE);
+        if(err) app_log(1, "Failed in grcy_cipher_decrypt %s -> %s",
+            gcry_strsource(err),
+            gcry_strerror(err));
+    }
+    gcry_cipher_close(cipherHd);
+    if(enc) {
+        PyMem_Free(ptext);
+        out = ctext;
+    } else {
+        PyMem_Free(ctext);
+        out = ptext;
+    }
+    return out;
+}
+
+
 static PyObject * encode_fn(PyObject *self, PyObject *args)
 {
     const char *payload;
     const char *mpwd_str;
-    if(!initalized) { 
+    if(!initalized) {
         PyErr_SetString(PyExc_RuntimeError, "Cryptera should be initialized"); 
         return NULL; 
     }
@@ -213,42 +258,7 @@ static PyObject * encode_fn(PyObject *self, PyObject *args)
                         "cipher payload should be less than 512 bytes");
         return NULL;
     }
-    const char *master_pwd = mpwd_str;
-    char iv[IV_SIZE];
-    memset(iv, 0x0, IV_SIZE);
-    char keyBuffer[BUFF_SIZE];
-    unsigned char plaintext[TXT_SIZE];
-    memset(plaintext, 0x0, TXT_SIZE);
-    memcpy(plaintext, payload, TXT_SIZE);
-    Py_DECREF(payload);
-    unsigned char ciphertext[TXT_SIZE];
-    memset(ciphertext, 0x0, TXT_SIZE);
-    char *salt = sect_t;
-    size_t saltLen = strlen(salt);
-    gcry_cipher_hd_t cipherHd;
-    gcry_error_t err;
-    err = gcry_cipher_open(&cipherHd, GCRY_CIPHER_AES256, GCRY_CIPHER_MODE_CBC, GCRY_CIPHER_SECURE);
-    if(err) app_log(1, "Failed in grcy_cipher_open %s -> %s",
-            gcry_strsource(err),
-            gcry_strerror(err));
-    gcry_kdf_derive(master_pwd, strlen(master_pwd), GCRY_KDF_PBKDF2, GCRY_MD_SHA256, salt, saltLen, 10000, BUFF_SIZE, keyBuffer);
-    err = gcry_cipher_setkey(cipherHd, keyBuffer, BUFF_SIZE);
-    if(err) app_log(1, "Failed in grcy_cipher_setkey %s -> %s",
-            gcry_strsource(err),
-            gcry_strerror(err));
-    err = gcry_cipher_setiv(cipherHd, iv, 16);
-    if(err) app_log(1, "Failed in grcy_cipher_setiv %s -> %s",
-            gcry_strsource(err),
-            gcry_strerror(err));
-    err = gcry_cipher_encrypt(cipherHd, ciphertext, TXT_SIZE, plaintext, TXT_SIZE);
-    if(err) app_log(1, "Failed in grcy_cipher_encrypt %s -> %s",
-            gcry_strsource(err),
-            gcry_strerror(err));
-    err = gcry_cipher_setiv(cipherHd, iv, 16);
-    if(err) app_log(1, "Failed in grcy_cipher_setiv %s -> %s",
-            gcry_strsource(err),
-            gcry_strerror(err));
-    gcry_cipher_close(cipherHd);
+    unsigned char* ciphertext = decOrenc(payload, mpwd_str, 1);
     Py_DECREF(mpwd_str);
     int i;
     PyObject *pylist, *item;
