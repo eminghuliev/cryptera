@@ -28,7 +28,8 @@ app_log(int is_err, const char *fmt, ...) {
 static char sect_t[UUID_LEN] __attribute__((section (HIDDEN_SECTION))) = { 0 };
 #pragma GCC pop_options
 
-static FILE* open_file(PyObject *path, const char *mode) {
+static 
+FILE* open_file(PyObject *path, const char *mode) {
     FILE *f;
     int async_err = 0;
     PyObject *bytes;
@@ -58,7 +59,8 @@ static FILE* open_file(PyObject *path, const char *mode) {
 
 }
 
-static unsigned int prep_elf(const char* fpath) {
+static 
+unsigned int prep_elf(const char* fpath) {
     FILE * fp = NULL;
     Elf64_Ehdr elfHdr;
     Elf64_Shdr* shTbl;
@@ -93,8 +95,9 @@ static unsigned int prep_elf(const char* fpath) {
         goto dealloc;
     }
     fseek(fp, elfHdr.e_shoff, SEEK_SET);
+    size_t shsize = elfHdr.e_shentsize * elfHdr.e_shnum;
     if(fread(shTbl, 1, elfHdr.e_shentsize * elfHdr.e_shnum, fp) != 
-            elfHdr.e_shentsize * elfHdr.e_shnum) {
+            shsize) {
         app_log(0, "Failed to read section header");
     }
     shbuff = PyMem_Malloc(shTbl[elfHdr.e_shstrndx].sh_size);
@@ -136,7 +139,8 @@ dealloc:
 
 static int initalized = 0;
 
-static PyObject * crypt_init(PyObject *self, PyObject *args) {
+static 
+PyObject * crypt_init(PyObject *self, PyObject *args) {
     Dl_info info;
     if(!(*sect_t)) {
         if (dladdr(crypt_init, &info)) {
@@ -167,27 +171,18 @@ static PyObject * crypt_init(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
-static PyObject * decode_fn(PyObject *self, PyObject *args) {
-    const char *payload;
-    if(!initalized) { 
-        PyErr_SetString(PyExc_RuntimeError, "Cryptera should be initialized"); 
-        return NULL; 
-    }
-    if (!PyArg_ParseTuple(args, "s", &payload))
-        return NULL;
-    return NULL;
-}
-
-unsigned char* decOrenc(const char * payload, const char *mpwd_str, _Bool enc) {
+static 
+unsigned char* decOrenc(const void * payload, const char *mpwd_str, _Bool enc) {
     const char *master_pwd = mpwd_str;
     char iv[IV_SIZE] = { 0 };
     char keyBuffer[BUFF_SIZE];
-    /* unsigned char ptext[TXT_SIZE] = { 0 };
-    unsigned char ctext[TXT_SIZE] = { 0 }; */
     unsigned char* ptext = PyMem_Malloc(TXT_SIZE);
     unsigned char* ctext = PyMem_Malloc(TXT_SIZE);
+    memset(ptext, 0x0, TXT_SIZE);
+    memset(ctext, 0x0, TXT_SIZE);
     unsigned char* out = NULL;
-    if(enc) memcpy(ptext, payload, TXT_SIZE);
+    if(enc) memcpy(ptext, (char*)payload, TXT_SIZE);
+    else memcpy(ctext, (unsigned char*)payload, TXT_SIZE);
     char *salt = sect_t;
     size_t saltLen = strlen(salt);
     gcry_cipher_hd_t cipherHd;
@@ -227,8 +222,77 @@ unsigned char* decOrenc(const char * payload, const char *mpwd_str, _Bool enc) {
     return out;
 }
 
+static 
+PyObject* testFn(PyObject *self, PyObject *args) {
+    char *payload = "Test content";
+    char *mpwd_str = "testpwd";
+    unsigned char* ciphertext = decOrenc(payload, mpwd_str, 1);
+    unsigned char* deciphertext = decOrenc(ciphertext, mpwd_str, 0);
+    for (int i = 0;  i < 512; i++) {
+        printf("%d", ciphertext[i]);
+    }
+    printf("ASCII: %s\n", deciphertext);
+    printf("\n");
+    Py_RETURN_NONE;
+}
 
-static PyObject * encode_fn(PyObject *self, PyObject *args)
+static 
+PyObject * decode_fn(PyObject *self, PyObject *args)
+{
+    if(!initalized) {
+        PyErr_SetString(PyExc_RuntimeError, "Cryptera should be initialized"); 
+        return NULL; 
+    }
+    if(PyTuple_GET_SIZE(args) < 2) {
+        PyErr_SetString(PyExc_TypeError, 
+                        "Decode function should have at least 2 arguments");
+        return NULL;
+    }
+
+    PyObject *mpwd_tuple;
+    mpwd_tuple = PyTuple_GET_ITEM(args, 0);
+    const char *mpwd_str = PyUnicode_AsUTF8(mpwd_tuple);
+
+    PyObject *cipher_tuple;
+    cipher_tuple = PyObject_Str(PyTuple_GET_ITEM(args, 1));
+    const char* payload = PyUnicode_AsUTF8(cipher_tuple);
+    /*
+    unsigned char* ciphertext = decOrenc(payload, mpwd_str, 0);
+    printf("%s\n", ciphertext);
+    */
+#if 0
+    const char *payload;
+    const char *mpwd_str;
+    if(!initalized) {
+        PyErr_SetString(PyExc_RuntimeError, "Cryptera should be initialized"); 
+        return NULL; 
+    }
+    if(PyTuple_GET_SIZE(args) < 2) {
+        PyErr_SetString(PyExc_TypeError, 
+                        "Decode function should have at least 2 arguments");
+        return NULL;
+    }
+    PyObject *mpwd_tuple;
+    PyObject *cipher_tuple;
+    Py_ssize_t cipher_size;
+    mpwd_tuple = PyTuple_GET_ITEM(args, 0);
+    cipher_tuple = PyTuple_GET_ITEM(args, 1);
+    if (!PyUnicode_Check(mpwd_tuple)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "master pwd and cipher tuple must be a string");
+        return NULL;
+    }
+    mpwd_str = PyUnicode_AsUTF8(mpwd_tuple);
+    payload = PyUnicode_AsUTF8AndSize(cipher_tuple, &cipher_size);
+    unsigned char* ciphertext = decOrenc(payload, mpwd_str, 0);
+    printf("%s\n", ciphertext);
+    Py_DECREF(mpwd_str);
+#endif
+    Py_RETURN_NONE;
+}
+
+static 
+PyObject * encode_fn(PyObject *self, PyObject *args)
 {
     const char *payload;
     const char *mpwd_str;
@@ -277,12 +341,13 @@ static PyObject * encode_fn(PyObject *self, PyObject *args)
 }
 
 static PyMethodDef CryptoMethods[] = {
-    {"decode",  decode_fn, METH_VARARGS,
+     {"decode",  decode_fn, METH_VARARGS,
      "Cryptera payload decoder"},
      {"encode",  encode_fn, METH_VARARGS,
      "Cryptera payload encoder"},
      {"init",  crypt_init, METH_VARARGS,
      "Cryptera payload initializer"},
+     {"test", testFn, METH_VARARGS, "Test fn"},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
