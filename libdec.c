@@ -256,10 +256,6 @@ PyObject * decode_fn(PyObject *self, PyObject *args)
     PyObject *cipher_tuple;
     cipher_tuple = PyObject_Str(PyTuple_GET_ITEM(args, 1));
     const char* payload = PyUnicode_AsUTF8(cipher_tuple);
-    /*
-    unsigned char* ciphertext = decOrenc(payload, mpwd_str, 0);
-    printf("%s\n", ciphertext);
-    */
 #if 0
     const char *payload;
     const char *mpwd_str;
